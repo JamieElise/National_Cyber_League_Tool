@@ -1,14 +1,13 @@
-
 #!/usr/bin/env python3
 """
-CTF Universal Cipher Solver v3
-------------------------------
+CTF Universal Cipher Solver v3.1
 - Recursive, order-independent decoder
 - Tracks full decoding path
 - Ranks outputs by confidence (English likelihood)
+- NEW: --vkey KEY (one or many) to try Vigenère with explicit keys
 """
 
-import base64, urllib.parse, string, gzip, zlib, re
+import argparse, base64, urllib.parse, string, re
 from itertools import product
 from math import log10
 
@@ -18,11 +17,13 @@ QUAD = {"TION":0.001,"THER":0.001,"HERE":0.0008,"OULD":0.0006,
 
 def quad_score(txt):
     t = ''.join(ch for ch in txt.upper() if ch.isalpha() or ch==' ')
-    return sum(log10(QUAD.get(t[i:i+4],1e-7)) for i in range(max(0,len(t)-3)))
+    if len(t) < 4:
+        return -1e6
+    return sum(log10(QUAD.get(t[i:i+4],1e-7)) for i in range(len(t)-3))
 
 def looks_english(s):
-    s = s.lower()
-    return (" " in s) and any(w in s for w in ["flag","ctf"," the "," and "," is ","safe","key","cipher","used"])
+    sl = s.lower()
+    return (" " in sl) and any(w in sl for w in ["flag","ctf"," the "," and "," is ","safe","key","cipher","used","fear","lack"])
 
 def confidence_score(text):
     score = quad_score(text)
@@ -63,114 +64,145 @@ def vigenere_decrypt(ct,key):
 
 # ---------- Rail Fence ----------
 def rail_decrypt(ct,key):
-    ct=re.sub(r"\s+","",ct)
-    rail_len=[0]*key
-    pat=list(range(key))+list(range(key-2,0,-1))
-    seq=[pat[i%len(pat)] for i in range(len(ct))]
+    txt = re.sub(r"\s+","",ct)
+    if key <= 1 or key >= len(txt): return txt
+    pattern = list(range(key)) + list(range(key-2,0,-1))
+    seq = [pattern[i % len(pattern)] for i in range(len(txt))]
+    rail_len = [0]*key
     for i in seq: rail_len[i]+=1
-    rails,idx,pos=[],0,[0]*key
+    rails, idx = [], 0
     for rl in rail_len:
-        rails.append(list(ct[idx:idx+rl])); idx+=rl
-    res=[]
+        rails.append(list(txt[idx:idx+rl])); idx += rl
+    pos = [0]*key
+    out=[]
     for i in seq:
-        res.append(rails[i][pos[i]]); pos[i]+=1
-    return ''.join(res)
+        out.append(rails[i][pos[i]]); pos[i]+=1
+    return ''.join(out)
 
-def auto_rail(ct):
+def auto_rail(ct, kmin=2, kmax=9, top=2):
     outs=[]
-    for k in range(2,9):
+    for k in range(kmin, kmax+1):
         pt=rail_decrypt(ct,k)
         outs.append((k,pt,confidence_score(pt)))
-    return sorted(outs,key=lambda x:x[2],reverse=True)[:2]
+    return sorted(outs,key=lambda x:x[2],reverse=True)[:top]
 
 # ---------- Encodings ----------
 def try_base(txt):
     outs=[]
     for n,f in [("B64",base64.b64decode),("B32",lambda s:base64.b32decode(s,casefold=True)),("B85",base64.b85decode)]:
-        try: outs.append((n,f(txt.encode()).decode()))
-        except: pass
+        try:
+            outs.append((n,f(txt.encode()).decode(errors="strict")))
+        except Exception:
+            pass
     return outs
 
 def try_hex(txt):
     c=re.sub(r"[^0-9A-Fa-f]","",txt)
-    if len(c)%2==0:
-        try: return [("Hex",bytes.fromhex(c).decode())]
-        except: return []
+    if len(c)%2==0 and c:
+        try: return [("Hex",bytes.fromhex(c).decode(errors="strict"))]
+        except Exception: return []
     return []
 
 def try_url(txt):
     if "%" in txt or "+" in txt:
         try: return [("URL",urllib.parse.unquote(txt))]
-        except: pass
+        except Exception: pass
     return []
 
 # ---------- Hash check ----------
 def detect_hash(t):
     clean=re.sub(r"[^0-9a-fA-F]","",t)
     lens={32:"MD5",40:"SHA1",56:"SHA224",64:"SHA256",96:"SHA384",128:"SHA512"}
-    if len(clean) in lens: print(f"[!] Looks like {lens[len(clean)]} hash.")
+    if len(clean) in lens: print(f"[!] Looks like {lens[len(clean)]} hash (one-way).")
 
 # ---------- Recursive engine ----------
-def recursive_decode(txt, depth=1, path=None, max_depth=6):
+def recursive_decode(txt, forced_vkeys=None, depth=1, path=None, max_depth=6):
     if path is None: path=[]
+    if forced_vkeys is None: forced_vkeys=[]
     if depth>max_depth: return []
 
     results=[]
 
     # Atbash
     at=atbash(txt)
-    if looks_english(at):
-        results.append(("Atbash",at,path+["Atbash"],confidence_score(at)))
+    results.append(("Atbash", at, path+["Atbash"], confidence_score(at)))
 
-    # Caesar small shifts
+    # Caesar (1..5) + ROT47
     for s in range(1,6):
         c=caesar(txt,s)
-        if looks_english(c):
-            results.append((f"Caesar({s})",c,path+[f"Caesar({s})"],confidence_score(c)))
-
-    # ROT47
+        results.append((f"Caesar({s})", c, path+[f"Caesar({s})"], confidence_score(c)))
     r47=rot47(txt)
-    if looks_english(r47):
-        results.append(("ROT47",r47,path+["ROT47"],confidence_score(r47)))
+    results.append(("ROT47", r47, path+["ROT47"], confidence_score(r47)))
 
-    # Vigenère brute small keys
+    # Vigenère: explicit keys first (user-supplied)
+    for key in forced_vkeys:
+        if not key or not key.isalpha(): continue
+        pt = vigenere_decrypt(txt, key)
+        results.append((f"Vigenere[{key}]", pt, path+[f"Vigenere[{key}]"], confidence_score(pt)))
+
+    # Vigenère: small brute (1–2 letters) remain as a light heuristic
     alpha=string.ascii_lowercase
     for L in range(1,3):
         for k in product(alpha,repeat=L):
             key=''.join(k)
             pt=vigenere_decrypt(txt,key)
-            if looks_english(pt):
-                results.append((f"Vigenere[{key}]",pt,path+[f"Vigenere[{key}]"],confidence_score(pt)))
+            results.append((f"Vigenere[{key}]", pt, path+[f"Vigenere[{key}]"], confidence_score(pt)))
 
-    # Base/Hex/URL
+    # Encodings
     for name,out in try_base(txt)+try_hex(txt)+try_url(txt):
         results.append((name,out,path+[name],confidence_score(out)))
 
-    # Rail Fence
+    # Rail Fence (top candidates)
     for k,pt,sc in auto_rail(txt):
-        if looks_english(pt):
-            results.append((f"RailFence({k})",pt,path+[f"RailFence({k})"],sc))
+        results.append((f"RailFence({k})", pt, path+[f"RailFence({k})"], sc))
 
-    # Recursive step
-    all_results=[]
+    # Deduplicate identical plaintexts but keep best score/path
+    best_map={}
     for name,out,new_path,sc in results:
-        all_results.append((name,out,new_path,sc))
-        for deeper in recursive_decode(out,depth+1,new_path,max_depth):
-            all_results.append(deeper)
+        k = (out,)
+        if k not in best_map or sc > best_map[k][2]:
+            best_map[k] = (name, new_path, sc)
+
+    # Recurse deeper on promising candidates
+    all_results=[]
+    for (out,), (name, new_path, sc) in best_map.items():
+        all_results.append((name, out, new_path, sc))
+        # Only recurse if output looks somewhat promising to avoid explosion
+        if sc > -10:  # loose cutoff
+            for deeper in recursive_decode(out, forced_vkeys, depth+1, new_path, max_depth):
+                all_results.append(deeper)
+
     return all_results
 
-# ---------- Main ----------
+# ---------- CLI ----------
+def parse_args():
+    p = argparse.ArgumentParser(description="CTF Universal Cipher Solver v3.1")
+    p.add_argument("ciphertext", nargs="?", help="Ciphertext to decode (if omitted, you will be prompted).")
+    p.add_argument("--vkey", action="append", default=[], help="Explicit Vigenère key to try (use multiple --vkey for several keys).")
+    p.add_argument("--maxdepth", type=int, default=6, help="Max recursion depth (default 6).")
+    return p.parse_args()
+
 if __name__=="__main__":
-    print("=== CTF Universal Cipher Solver v3 (path tracking + confidence) ===")
-    c=input("Enter ciphertext: ").strip()
-    sols=recursive_decode(c)
+    args = parse_args()
+    c = args.ciphertext or input("Enter ciphertext: ").strip()
+    sols = recursive_decode(c, forced_vkeys=args.vkey, max_depth=args.maxdepth)
     if not sols:
         print("No clear plaintexts found.")
     else:
-        sols.sort(key=lambda x:x[3],reverse=True)
+        # Rank and show top 12
+        sols.sort(key=lambda x:x[3], reverse=True)
         print("\n=== Ranked Candidates ===")
-        for i,(name,out,path,score) in enumerate(sols[:10],1):
-            print(f"[#{i} | Confidence {score:.2f}]")
+        shown=set()
+        rank=1
+        for name,out,path,score in sols:
+            sig=(out,)
+            if sig in shown: continue
+            shown.add(sig)
+            print(f"[#{rank} | Confidence {score:.2f}]")
             print("Path:", " → ".join(path))
             print("Plaintext:", out)
             print("-"*70)
+            rank += 1
+            if rank>12: break
+        detect_hash(c)
+
