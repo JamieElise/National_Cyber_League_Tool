@@ -1,0 +1,8 @@
+README.md
+decoder.py
+setup.py
+ctfsolve.egg-info/PKG-INFO
+ctfsolve.egg-info/SOURCES.txt
+ctfsolve.egg-info/dependency_links.txt
+ctfsolve.egg-info/entry_points.txt
+ctfsolve.egg-info/top_level.txt
