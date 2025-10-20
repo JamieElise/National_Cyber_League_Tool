@@ -5,6 +5,7 @@ CTF Universal Cipher Solver v3.1
 - Tracks full decoding path
 - Ranks outputs by confidence (English likelihood)
 - NEW: --vkey KEY (one or many) to try Vigenère with explicit keys
+- NEW: --RSA KEY take you into RSA tool
 """
 
 import argparse, base64, urllib.parse, string, re
@@ -180,33 +181,21 @@ def parse_args():
     p.add_argument("ciphertext", nargs="?", help="Ciphertext to decode (if omitted, you will be prompted).")
     p.add_argument("--vkey", action="append", default=[], help="Explicit Vigenère key to try (use multiple --vkey for several keys).")
     p.add_argument("--maxdepth", type=int, default=6, help="Max recursion depth (default 6).")
+    p.add_argument("--RSA", "-RSA", action="store_true", help="Launch the RSA decryption helper.")
     return p.parse_args()
 
 def main():
-    import sys
+    import sys, os
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    import RSA_Tool
     args = parse_args()
-    c = args.ciphertext or input("Enter ciphertext: ").strip()
-    sols = recursive_decode(c, forced_vkeys=args.vkey, max_depth=args.maxdepth)
-    if not sols:
-        print("No clear plaintexts found.")
-        return
-    sols.sort(key=lambda x:x[3], reverse=True)
-    print("\n=== Ranked Candidates ===")
-    shown=set()
-    rank=1
-    for name,out,path,score in sols:
-        sig=(out,)
-        if sig in shown: 
-            continue
-        shown.add(sig)
-        print(f"[#{rank} | Confidence {score:.2f}]")
-        print("Path:", " → ".join(path))
-        print("Plaintext:", out)
-        print("-"*70)
-        rank += 1
-        if rank>12: break
-    detect_hash(c)
 
-if __name__ == "__main__":
-    main()
+    # --- RSA helper mode ---
+    if args.RSA:
+        print("=== RSA Decryption Helper ===")
+        RSA_Tool.main()
+        return
+
+    # --- Normal solver mode ---
+    c = args.ciphertext or input("Enter ciphertext: ").strip()
 
